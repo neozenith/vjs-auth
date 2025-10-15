@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VJS Auth - Interactive Development</title>
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Custom styles for animations -->
+    <style>
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .animate-fade-in {
+        animation: fadeIn 0.5s ease-out;
+      }
+
+      .scale-95 {
+        transform: scale(0.95);
+      }
+    </style>
+  </head>
+  <body
+    class="min-h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-purple-800 flex items-center justify-center p-5"
+  >
+    <div class="container bg-white rounded-3xl p-10 max-w-2xl w-full shadow-2xl">
+      <h1 class="text-5xl font-bold text-indigo-600 mb-6">VJS Auth</h1>
+
+      <p class="text-gray-700 leading-relaxed mb-4">
+        Welcome to the VJS Auth interactive development environment. This site is configured for iterative development
+        with Playwright testing.
+      </p>
+
+      <p class="text-gray-700 leading-relaxed mb-6">
+        This is a minimal baseline setup that will be enhanced based on your requirements.
+      </p>
+
+      <div class="bg-green-50 border-l-4 border-green-500 rounded-lg p-5 mt-6">
+        <h2 class="text-green-700 text-xl font-semibold mb-3">System Status</h2>
+        <ul id="status-container" class="space-y-2">
+          <li class="text-gray-700 flex items-start">
+            <span class="text-green-600 font-bold mr-2">✓</span>
+            <span>Site loaded successfully</span>
+          </li>
+          <li class="text-gray-700 flex items-start">
+            <span class="text-green-600 font-bold mr-2">✓</span>
+            <span>Port: 5173</span>
+          </li>
+          <li class="text-gray-700 flex items-start">
+            <span class="text-green-600 font-bold mr-2">✓</span>
+            <span>Playwright testing enabled</span>
+          </li>
+          <li class="text-gray-700 flex items-start">
+            <span class="text-green-600 font-bold mr-2">✓</span>
+            <span>Ready for development</span>
+          </li>
+          <li class="text-gray-700 flex items-start">
+            <span class="text-green-600 font-bold mr-2">✓</span>
+            <span>Tailwind CSS loaded</span>
+          </li>
+        </ul>
+      </div>
+
+      <!-- Timestamp will be injected here by script.js -->
+      <div id="timestamp"></div>
+
+      <!-- Interactive features will be added here by script.js -->
+    </div>
+
+    <!-- Load main JavaScript -->
+    <script src="script.js"></script>
+  </body>
+</html>

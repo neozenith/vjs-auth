@@ -1,0 +1,17 @@
+[project]
+name = "vjs-auth"
+version = "0.1.0"
+description = "Interactive static site development with pytest and Playwright"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8.0.0",
+    "pytest-playwright>=0.4.0",
+    "playwright>=1.40.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--verbose --tb=short"
