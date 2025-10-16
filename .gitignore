@@ -209,3 +209,6 @@ __marimo__/
 .claude/
 CLAUDE.md
 .playwright-mcp/
+.screenshots/
+
+sites/**/config.json

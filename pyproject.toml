@@ -7,6 +7,10 @@ dependencies = [
     "pytest>=8.0.0",
     "pytest-playwright>=0.4.0",
     "playwright>=1.40.0",
+    "flask>=3.0.0",
+    "flask-cors>=4.0.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.1.1",
 ]
 
 [tool.pytest.ini_options]

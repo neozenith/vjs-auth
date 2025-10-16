@@ -13,6 +13,233 @@
   console.log("Ready for iterative development");
 
   /**
+   * OAuth Configuration
+   * IMPORTANT: Client ID is public, but client_secret must stay on Lambda@Edge
+   *
+   * Lambda@Edge Pattern (Unified Server):
+   * - Single server handles both static files AND OAuth callback
+   * - Frontend redirects to Google OAuth
+   * - Google redirects back to /oauth/callback (same host!)
+   * - Server exchanges code for token (has client_secret)
+   * - Server sets cookie and redirects back to /
+   *
+   * This mimics production CloudFront + Lambda@Edge architecture.
+   *
+   * Configuration is loaded dynamically from config.json at runtime.
+   */
+  let OAuthConfig = null;
+
+  /**
+   * Load OAuth configuration from config.json
+   * @returns {Promise<Object>} OAuth configuration object
+   */
+  async function loadConfig() {
+    try {
+      const response = await fetch("/config.json");
+      if (!response.ok) {
+        throw new Error(`Failed to load config: ${response.status}`);
+      }
+      const config = await response.json();
+
+      // Build OAuth configuration from loaded config
+      OAuthConfig = {
+        clientId: config.oauth.clientId,
+        redirectUri: window.location.origin + config.oauth.redirectPath,
+        authorizationEndpoint: config.oauth.authorizationEndpoint,
+        scopes: config.oauth.scopes,
+      };
+
+      console.log("OAuth configuration loaded successfully");
+      console.log("Client ID:", OAuthConfig.clientId);
+      console.log("Redirect URI:", OAuthConfig.redirectUri);
+
+      return OAuthConfig;
+    } catch (error) {
+      console.error("Failed to load configuration:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * PKCE Utilities for OAuth 2.0 Authorization Code Flow
+   */
+  const PKCEUtils = {
+    /**
+     * Generate a random code verifier for PKCE
+     * @returns {string} Base64 URL-encoded random string
+     */
+    generateCodeVerifier() {
+      const array = new Uint8Array(32);
+      crypto.getRandomValues(array);
+      return this.base64UrlEncode(array);
+    },
+
+    /**
+     * Generate code challenge from verifier using SHA-256
+     * @param {string} verifier - The code verifier
+     * @returns {Promise<string>} Base64 URL-encoded SHA-256 hash
+     */
+    async generateCodeChallenge(verifier) {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(verifier);
+      const hash = await crypto.subtle.digest("SHA-256", data);
+      return this.base64UrlEncode(new Uint8Array(hash));
+    },
+
+    /**
+     * Generate random state parameter for CSRF protection
+     * @returns {string} Random state string
+     */
+    generateState() {
+      const array = new Uint8Array(16);
+      crypto.getRandomValues(array);
+      return this.base64UrlEncode(array);
+    },
+
+    /**
+     * Base64 URL-encode a byte array
+     * @param {Uint8Array} buffer - Byte array to encode
+     * @returns {string} Base64 URL-encoded string
+     */
+    base64UrlEncode(buffer) {
+      const base64 = btoa(String.fromCharCode(...buffer));
+      return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+    },
+  };
+
+  /**
+   * OAuth Manager for Lambda@Edge pattern
+   */
+  const OAuthManager = {
+    /**
+     * Initiate OAuth PKCE flow with Lambda@Edge callback
+     *
+     * Lambda@Edge Pattern:
+     * 1. Generate PKCE parameters
+     * 2. Encode code_verifier in state parameter
+     * 3. Redirect to Google OAuth with Lambda@Edge callback URL
+     * 4. Google redirects to Lambda@Edge with state containing code_verifier
+     * 5. Lambda@Edge extracts code_verifier from state and exchanges token
+     */
+    async initiateOAuthFlow() {
+      console.log("Initiating OAuth PKCE flow (Lambda@Edge pattern)...");
+
+      // Generate PKCE parameters
+      const codeVerifier = PKCEUtils.generateCodeVerifier();
+      const codeChallenge = await PKCEUtils.generateCodeChallenge(codeVerifier);
+      const csrfToken = PKCEUtils.generateState();
+
+      // Encode code_verifier in state parameter
+      // State will be: base64(JSON({csrf: xxx, verifier: xxx}))
+      const stateData = {
+        csrf: csrfToken,
+        verifier: codeVerifier,
+      };
+      const stateJson = JSON.stringify(stateData);
+      const state = btoa(stateJson);
+
+      // Store CSRF token for validation
+      sessionStorage.setItem("oauth_csrf", csrfToken);
+
+      console.log("PKCE parameters generated");
+      console.log("State contains both CSRF token and code_verifier");
+
+      // Build authorization URL
+      // IMPORTANT: redirect_uri must match EXACTLY what's in Google Cloud Console
+      const params = new URLSearchParams({
+        client_id: OAuthConfig.clientId,
+        redirect_uri: OAuthConfig.redirectUri,
+        response_type: "code",
+        scope: OAuthConfig.scopes.join(" "),
+        state: state,
+        code_challenge: codeChallenge,
+        code_challenge_method: "S256",
+        access_type: "offline",
+        prompt: "consent",
+      });
+
+      const authUrl = `${OAuthConfig.authorizationEndpoint}?${params.toString()}`;
+      console.log("Redirecting to Google OAuth...");
+      console.log("Redirect URI:", OAuthConfig.redirectUri);
+      console.log("Authorization URL:", authUrl);
+
+      // Redirect to Google OAuth
+      window.location.href = authUrl;
+    },
+
+    /**
+     * Check for OAuth callback errors
+     *
+     * Lambda@Edge Pattern:
+     * Lambda@Edge handles the entire callback, token exchange, and cookie setting.
+     * The frontend only needs to check for errors and clean up.
+     */
+    async handleOAuthCallback() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const oauthError = urlParams.get("oauth_error");
+
+      // Check if Lambda@Edge redirected with an error
+      if (oauthError) {
+        console.error("OAuth error from Lambda@Edge:", oauthError);
+        let errorMessage = "OAuth authentication failed";
+
+        switch (oauthError) {
+          case "no_code":
+            errorMessage = "No authorization code received from Google";
+            break;
+          case "no_verifier":
+            errorMessage = "PKCE code verifier missing";
+            break;
+          case "server_config":
+            errorMessage = "Server configuration error (client_secret not set)";
+            break;
+          case "token_exchange_failed":
+            errorMessage = "Failed to exchange authorization code for token";
+            break;
+          case "internal_error":
+            errorMessage = "Internal server error during OAuth";
+            break;
+        }
+
+        alert(`OAuth Error: ${errorMessage}`);
+        this.cleanupOAuthState();
+
+        // Clean URL
+        const cleanUrl = window.location.origin + window.location.pathname;
+        window.history.replaceState({}, document.title, cleanUrl);
+
+        return false;
+      }
+
+      // Check if we just came back from OAuth (Lambda@Edge set the cookie)
+      // No code parameter because Lambda@Edge already processed it
+      const hasToken = CookieManager.hasGoogleOAuthToken();
+      const storedCsrf = sessionStorage.getItem("oauth_csrf");
+
+      if (hasToken && storedCsrf) {
+        console.log("OAuth callback processed by Lambda@Edge successfully");
+        this.cleanupOAuthState();
+
+        // Clean URL
+        const cleanUrl = window.location.origin + window.location.pathname;
+        window.history.replaceState({}, document.title, cleanUrl);
+
+        return true;
+      }
+
+      return false; // Not an OAuth callback
+    },
+
+    /**
+     * Clean up OAuth state from sessionStorage
+     */
+    cleanupOAuthState() {
+      sessionStorage.removeItem("oauth_csrf");
+      console.log("OAuth state cleaned up");
+    },
+  };
+
+  /**
    * Cookie management utilities
    */
   const CookieManager = {
@@ -77,8 +304,21 @@
   /**
    * Initialize the application when DOM is ready
    */
-  function init() {
-    console.log("Initializing VJS Auth...");
+  async function init() {
+    console.log("Initializing VJS Auth (Lambda@Edge pattern)...");
+
+    // Load OAuth configuration first
+    try {
+      await loadConfig();
+    } catch (error) {
+      console.error("Failed to initialize: Could not load configuration");
+      alert("Configuration Error: Unable to load OAuth settings. Please check console for details.");
+      return;
+    }
+
+    // Check for OAuth callback errors or completion
+    // Lambda@Edge handles the redirect back, so we just check and clean up
+    await OAuthManager.handleOAuthCallback();
 
     // Update status indicator
     updateStatusIndicator();
@@ -190,16 +430,55 @@
     lockedContentDiv.className = "mt-6 p-6 bg-amber-50 rounded-lg border-l-4 border-amber-500";
 
     if (isAuthenticated && token) {
-      // Authenticated state (future implementation)
+      // Authenticated state - show unlocked content
+      lockedContentDiv.className = "mt-6 p-6 bg-green-50 rounded-lg border-l-4 border-green-500";
       lockedContentDiv.innerHTML = `
-                <h3 class="text-amber-700 font-semibold mb-3 flex items-center">
+                <h3 class="text-green-700 font-semibold mb-3 flex items-center">
                     <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z"></path>
                     </svg>
-                    Google Calendar Access
+                    Unlocked: Google Calendar Access
                 </h3>
-                <p class="text-gray-700 mb-3">You are authenticated! Future calendar features will appear here.</p>
+                <p class="text-gray-700 mb-4">
+                    You are successfully authenticated with Google! Calendar features will be available here.
+                </p>
+                <div class="bg-white p-4 rounded-lg mb-4">
+                    <div class="flex items-center justify-center text-green-600 py-4">
+                        <svg class="w-12 h-12 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        <div>
+                            <p class="font-semibold text-lg">Authentication Successful</p>
+                            <p class="text-sm text-gray-600">Access token stored securely</p>
+                        </div>
+                    </div>
+                </div>
+                <button
+                    id="google-signout-button"
+                    class="w-full bg-red-600 hover:bg-red-700 text-white font-medium py-3 px-6 rounded-lg transition-colors duration-200 flex items-center justify-center"
+                >
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
+                    </svg>
+                    Sign Out
+                </button>
+                <p class="text-xs text-gray-500 mt-3 text-center">
+                    Signing out will remove your access token from this browser
+                </p>
             `;
+
+      // Add sign-out handler
+      setTimeout(() => {
+        const signOutButton = document.getElementById("google-signout-button");
+        if (signOutButton) {
+          signOutButton.addEventListener("click", function () {
+            console.log("Sign-Out button clicked");
+            CookieManager.deleteCookie("google_oauth_access_token");
+            console.log("Access token removed from cookies");
+            window.location.reload();
+          });
+        }
+      }, 100);
     } else {
       // Unauthorized state - showing lock icon and sign-in button
       lockedContentDiv.innerHTML = `
@@ -237,14 +516,21 @@
                 </p>
             `;
 
-      // Add click handler for sign-in button (placeholder for future PKCE implementation)
+      // Add click handler for sign-in button to initiate OAuth flow
       setTimeout(() => {
         const signInButton = document.getElementById("google-signin-button");
         if (signInButton) {
-          signInButton.addEventListener("click", function () {
-            console.log("Google Sign-In button clicked");
-            console.log("PKCE OAuth flow will be implemented in future iteration");
-            alert("Google OAuth PKCE flow not yet implemented.\n\nThis button is ready for future OAuth integration.");
+          signInButton.addEventListener("click", async function () {
+            console.log("Google Sign-In button clicked (Lambda@Edge pattern)");
+
+            // Initiate OAuth PKCE flow
+            // Lambda@Edge will handle the callback and token exchange
+            try {
+              await OAuthManager.initiateOAuthFlow();
+            } catch (error) {
+              console.error("OAuth flow initiation failed:", error);
+              alert(`OAuth Error: ${error.message}`);
+            }
           });
         }
       }, 100);

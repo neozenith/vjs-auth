@@ -3,7 +3,7 @@ THIS_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 THIS_DIR_NAME := $(notdir $(patsubst %/,%,$(THIS_DIR)))
 TEST_DIR := tests/$(THIS_DIR_NAME)
 
-.PHONY: debug serve build docs format test clean
+.PHONY: debug serve serve-legacy serve-oauth serve-all build docs format test clean
 
 debug:
 	@echo "THIS_DIR: $(THIS_DIR)"
@@ -12,7 +12,20 @@ debug:
 	@echo "TEST_DIR: $(TEST_DIR)"
 
 serve:
-	uv run -m http.server --directory $(THIS_DIR) $(PORT_NUMBER)
+	@echo "Starting unified development server on port $(PORT_NUMBER)..."
+	@echo ""
+	@echo "This server provides:"
+	@echo "  - Static file serving (like CloudFront + S3)"
+	@echo "  - OAuth callback handler (like Lambda@Edge)"
+	@echo ""
+	@echo "Make sure environment variables are set:"
+	@echo "  GOOGLE_OAUTH_CLIENT_ID"
+	@echo "  GOOGLE_OAUTH_CLIENT_SECRET"
+	@echo "  FRONTEND_URL (optional, defaults to http://localhost:5173)"
+	@echo ""
+	PORT=$(PORT_NUMBER) uv run python $(THIS_DIR)/server.py
+
+
 
 build:
 	@echo "No build step required for vjsauth"
