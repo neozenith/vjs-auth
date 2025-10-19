@@ -19,3 +19,8 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "--verbose --tb=short"
+
+[dependency-groups]
+dev = [
+    "jinja2>=3.1.6",
+]

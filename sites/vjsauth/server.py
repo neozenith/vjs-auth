@@ -1,23 +1,28 @@
 """
-Unified Development Server for VJS Auth.
+Development Server for VJS Auth - Lambda@Edge Wrapper
 
-This server provides both:
+This server provides:
 1. Static file serving (simulating S3 + CloudFront)
-2. OAuth callback handling (simulating Lambda@Edge)
+2. Lambda@Edge handler wrapper for local testing
 
-This mimics the production architecture where:
+Production architecture:
 - CloudFront serves static files from S3
-- Lambda@Edge intercepts /oauth/callback for token exchange
+- Lambda@Edge (handler.py) intercepts /oauth/callback for token exchange
 
-Everything runs on the same host:port for simplified local development.
+Local development:
+- Flask serves static files
+- Flask wraps handler.py to simulate Lambda@Edge environment
 """
 
 import os
 from pathlib import Path
-from flask import Flask, request, jsonify, redirect, make_response, send_from_directory
+from flask import Flask, request, jsonify, make_response, send_from_directory
 from flask_cors import CORS
-import requests
 from dotenv import load_dotenv
+import urllib.parse
+
+# Import the Lambda@Edge handler
+from handler import lambda_handler
 
 # Load environment variables from .env file
 load_dotenv()
@@ -33,189 +38,148 @@ CORS(app)  # Enable CORS for local development
 # IMPORTANT: Set these as environment variables for production
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_OAUTH_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_OAUTH_CLIENT_SECRET"]
-GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
 # Port configuration
 PORT = int(os.environ.get("PORT", "5173"))
 FRONTEND_URL = f"http://localhost:{PORT}"
 
 
+def flask_request_to_lambda_event(flask_request):
+    """
+    Convert Flask request to Lambda@Edge origin-request event format.
+
+    CloudFront Lambda@Edge event structure for origin-request:
+    {
+        'Records': [{
+            'cf': {
+                'request': {
+                    'uri': '/oauth/callback',
+                    'querystring': 'code=xxx&state=yyy',
+                    'headers': {
+                        'host': [{'key': 'Host', 'value': 'example.com'}],
+                        ...
+                    },
+                    'method': 'GET'
+                }
+            }
+        }]
+    }
+    """
+    # Convert Flask headers to CloudFront headers format
+    cf_headers = {}
+    for header_name, header_value in flask_request.headers:
+        header_key = header_name.lower()
+        cf_headers[header_key] = [
+            {"key": header_name, "value": header_value}
+        ]
+
+    # Add custom headers for OAuth configuration (DEVELOPMENT ONLY)
+    # Production uses AWS Secrets Manager instead of headers
+    # These headers allow handler.py to work locally without Secrets Manager
+    cf_headers["x-oauth-client-id"] = [
+        {"key": "X-OAuth-Client-Id", "value": GOOGLE_CLIENT_ID}
+    ]
+    cf_headers["x-oauth-client-secret"] = [
+        {"key": "X-OAuth-Client-Secret", "value": GOOGLE_CLIENT_SECRET}
+    ]
+    cf_headers["x-oauth-frontend-url"] = [
+        {"key": "X-OAuth-Frontend-URL", "value": FRONTEND_URL}
+    ]
+
+    # Build Lambda@Edge event
+    event = {
+        "Records": [
+            {
+                "cf": {
+                    "request": {
+                        "uri": flask_request.path,
+                        "querystring": flask_request.query_string.decode("utf-8"),
+                        "headers": cf_headers,
+                        "method": flask_request.method,
+                    }
+                }
+            }
+        ]
+    }
+
+    return event
+
+
+def lambda_response_to_flask(lambda_response):
+    """
+    Convert Lambda@Edge response to Flask response.
+
+    Lambda@Edge response format:
+    {
+        'status': '302',
+        'statusDescription': 'Found',
+        'headers': {
+            'location': [{'key': 'Location', 'value': 'https://...'}],
+            'set-cookie': [{'key': 'Set-Cookie', 'value': '...'}],
+            ...
+        }
+    }
+    """
+    status_code = int(lambda_response.get("status", 200))
+
+    # Create Flask response
+    # For redirects, we need to extract the location
+    headers_dict = lambda_response.get("headers", {})
+
+    location = None
+    if "location" in headers_dict:
+        location = headers_dict["location"][0]["value"]
+
+    # Create response
+    if location:
+        response = make_response("", status_code)
+        response.headers["Location"] = location
+    else:
+        response = make_response("", status_code)
+
+    # Add all headers
+    for header_name, header_list in headers_dict.items():
+        if header_name == "location":
+            continue  # Already handled
+
+        for header_item in header_list:
+            header_key = header_item["key"]
+            header_value = header_item["value"]
+
+            # Special handling for Set-Cookie (can have multiple)
+            if header_name == "set-cookie":
+                response.headers.add(header_key, header_value)
+            else:
+                response.headers[header_key] = header_value
+
+    return response
+
+
 @app.route("/oauth/callback", methods=["GET"])
 def oauth_callback():
     """
-    Lambda@Edge-style OAuth callback handler.
+    Flask wrapper for Lambda@Edge OAuth callback handler.
 
-    This simulates what Lambda@Edge would do in production:
-    1. Intercepts OAuth callback from Google
-    2. Extracts authorization code and state
-    3. Retrieves PKCE code_verifier from query params (passed via state)
-    4. Exchanges code for access token with Google
-    5. Sets cookie with access token
-    6. Redirects back to frontend
+    Converts Flask request to Lambda@Edge event format,
+    calls handler.py, then converts Lambda@Edge response to Flask response.
 
-    In production, this would be a Lambda@Edge function at CloudFront.
+    In production, CloudFront would call handler.lambda_handler directly.
     """
     try:
-        # Get OAuth callback parameters
-        code = request.args.get("code")
-        state = request.args.get("state")
-        error = request.args.get("error")
+        # Convert Flask request to Lambda@Edge event format
+        event = flask_request_to_lambda_event(request)
 
-        # Handle OAuth errors
-        if error:
-            error_description = request.args.get("error_description", "Unknown error")
-            app.logger.error(f"OAuth error: {error} - {error_description}")
-            # Redirect to frontend with error
-            return redirect(f"{FRONTEND_URL}/?oauth_error={error}")
+        # Call Lambda@Edge handler
+        lambda_response = lambda_handler(event, None)
 
-        if not code:
-            app.logger.error("No authorization code received")
-            return redirect(f"{FRONTEND_URL}/?oauth_error=no_code")
-
-        if not state:
-            app.logger.error("No state parameter received")
-            return redirect(f"{FRONTEND_URL}/?oauth_error=no_state")
-
-        # Decode state parameter to extract code_verifier
-        # State format: base64(JSON({csrf: xxx, verifier: xxx}))
-        try:
-            import base64
-            import json
-
-            state_json = base64.b64decode(state).decode("utf-8")
-            state_data = json.loads(state_json)
-            code_verifier = state_data.get("verifier")
-            csrf_token = state_data.get("csrf")
-
-            if not code_verifier:
-                app.logger.error("No code_verifier in state parameter")
-                return redirect(f"{FRONTEND_URL}/?oauth_error=no_verifier")
-
-            app.logger.info("Successfully extracted code_verifier from state parameter")
-
-        except Exception as decode_error:
-            app.logger.error(f"Failed to decode state parameter: {decode_error}")
-            return redirect(f"{FRONTEND_URL}/?oauth_error=invalid_state")
-
-        # Build redirect URI (must match what was sent to Google)
-        redirect_uri = f"{request.host_url}oauth/callback"
-
-        # Exchange authorization code for access token
-        token_params = {
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "code": code,
-            "code_verifier": code_verifier,
-            "grant_type": "authorization_code",
-            "redirect_uri": redirect_uri,
-        }
-
-        response = requests.post(
-            GOOGLE_TOKEN_ENDPOINT,
-            data=token_params,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-
-        if not response.ok:
-            error_data = response.json()
-            error_msg = error_data.get("error", "token_exchange_failed")
-            app.logger.error(f"Token exchange failed: {error_msg}")
-            return redirect(f"{FRONTEND_URL}/?oauth_error={error_msg}")
-
-        token_data = response.json()
-        access_token = token_data.get("access_token")
-
-        if not access_token:
-            app.logger.error("No access token in response")
-            return redirect(f"{FRONTEND_URL}/?oauth_error=no_token")
-
-        # Create redirect response to frontend
-        response = make_response(redirect(FRONTEND_URL))
-
-        # Set cookie with access token (Lambda@Edge would do this)
-        # Using SameSite=Lax for security (same as frontend)
-        response.set_cookie(
-            "google_oauth_access_token",
-            access_token,
-            max_age=7 * 24 * 60 * 60,  # 7 days
-            httponly=False,  # Allow JavaScript access (needed for frontend)
-            secure=False,  # Set to True in production with HTTPS
-            samesite="Lax",
-            path="/",
-        )
-
-        app.logger.info("OAuth flow completed successfully, redirecting to frontend")
-        return response
+        # Convert Lambda@Edge response to Flask response
+        return lambda_response_to_flask(lambda_response)
 
     except Exception as e:
-        app.logger.error(f"OAuth callback error: {str(e)}")
-        return redirect(f"{FRONTEND_URL}/?oauth_error=internal_error")
+        app.logger.error(f"OAuth callback wrapper error: {str(e)}")
+        return make_response(f"Internal Error: {str(e)}", 500)
 
 
-@app.route("/oauth/token", methods=["POST"])
-def exchange_token():
-    """
-    Exchange authorization code for access token.
-
-    Expected JSON body:
-    {
-        "code": "authorization_code",
-        "code_verifier": "pkce_verifier",
-        "redirect_uri": "http://localhost:5173"
-    }
-    """
-    try:
-        data = request.get_json()
-
-        if not data:
-            return jsonify({"error": "Invalid request body"}), 400
-
-        code = data.get("code")
-        code_verifier = data.get("code_verifier")
-        redirect_uri = data.get("redirect_uri")
-
-        if not all([code, code_verifier, redirect_uri]):
-            return jsonify(
-                {
-                    "error": "Missing required fields",
-                    "required": ["code", "code_verifier", "redirect_uri"],
-                }
-            ), 400
-
-        # Exchange code for token with Google
-        token_params = {
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "code": code,
-            "code_verifier": code_verifier,
-            "grant_type": "authorization_code",
-            "redirect_uri": redirect_uri,
-        }
-
-        response = requests.post(
-            GOOGLE_TOKEN_ENDPOINT,
-            data=token_params,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-
-        if not response.ok:
-            error_data = response.json()
-            return jsonify(
-                {
-                    "error": error_data.get("error", "token_exchange_failed"),
-                    "error_description": error_data.get(
-                        "error_description", "Failed to exchange token"
-                    ),
-                }
-            ), response.status_code
-
-        # Return the token data to frontend
-        token_data = response.json()
-        return jsonify(token_data), 200
-
-    except Exception as e:
-        app.logger.error(f"Token exchange error: {str(e)}")
-        return jsonify({"error": "internal_server_error", "message": str(e)}), 500
 
 
 @app.route("/health", methods=["GET"])

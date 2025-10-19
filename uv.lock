@@ -577,6 +577,11 @@ dependencies = [
     { name = "requests" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "jinja2" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "flask", specifier = ">=3.0.0" },
@@ -587,6 +592,9 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.1.1" },
     { name = "requests", specifier = ">=2.31.0" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "jinja2", specifier = ">=3.1.6" }]
 
 [[package]]
 name = "werkzeug"

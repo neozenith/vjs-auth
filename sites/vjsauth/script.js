@@ -302,6 +302,165 @@
   };
 
   /**
+   * Google Calendar API Manager
+   */
+  const CalendarManager = {
+    /**
+     * List all calendars for the authenticated user
+     * @returns {Promise<Array>} Array of calendar objects
+     */
+    async listCalendars() {
+      const token = CookieManager.getGoogleOAuthToken();
+      if (!token) {
+        throw new Error("No access token available");
+      }
+
+      const response = await fetch("https://www.googleapis.com/calendar/v3/users/me/calendarList", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`Failed to fetch calendars: ${errorData.error.message}`);
+      }
+
+      const data = await response.json();
+      return data.items || [];
+    },
+
+    /**
+     * Find a calendar by name (summary)
+     * @param {string} calendarName - Name of the calendar to find
+     * @returns {Promise<Object|null>} Calendar object or null if not found
+     */
+    async findCalendarByName(calendarName) {
+      const calendars = await this.listCalendars();
+      return calendars.find((cal) => cal.summary === calendarName) || null;
+    },
+
+    /**
+     * Get events from a calendar
+     * @param {string} calendarId - Calendar ID
+     * @param {Object} options - Query options
+     * @returns {Promise<Array>} Array of event objects
+     */
+    async getEvents(calendarId, options = {}) {
+      const token = CookieManager.getGoogleOAuthToken();
+      if (!token) {
+        throw new Error("No access token available");
+      }
+
+      const params = new URLSearchParams({
+        singleEvents: "true",
+        orderBy: "startTime",
+        ...options,
+      });
+
+      const response = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?${params}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        },
+      );
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`Failed to fetch events: ${errorData.error.message}`);
+      }
+
+      const data = await response.json();
+      return data.items || [];
+    },
+
+    /**
+     * Get recent past events
+     * @param {string} calendarId - Calendar ID
+     * @param {number} maxResults - Maximum number of events
+     * @returns {Promise<Array>} Array of past event objects
+     */
+    async getRecentPastEvents(calendarId, maxResults = 5) {
+      const now = new Date().toISOString();
+      const events = await this.getEvents(calendarId, {
+        timeMax: now,
+        maxResults: maxResults,
+      });
+      // Reverse to get most recent first
+      return events.reverse();
+    },
+
+    /**
+     * Get upcoming future events
+     * @param {string} calendarId - Calendar ID
+     * @param {number} maxResults - Maximum number of events
+     * @returns {Promise<Array>} Array of future event objects
+     */
+    async getUpcomingEvents(calendarId, maxResults = 3) {
+      const now = new Date().toISOString();
+      return await this.getEvents(calendarId, {
+        timeMin: now,
+        maxResults: maxResults,
+      });
+    },
+
+    /**
+     * Format event for display
+     * @param {Object} event - Calendar event object
+     * @param {Object} previousEvent - Previous event for calculating days since
+     * @returns {string} Formatted HTML string
+     */
+    formatEvent(event, previousEvent = null) {
+      const start = event.start.dateTime || event.start.date;
+      const end = event.end.dateTime || event.end.date;
+
+      const startDate = new Date(start);
+      const endDate = new Date(end);
+
+      const formatDateTime = (date) => {
+        return date.toLocaleString("en-US", {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        });
+      };
+
+      // Calculate days since previous event
+      let daysSincePrevious = null;
+      if (previousEvent) {
+        const previousStart = new Date(previousEvent.start.dateTime || previousEvent.start.date);
+        const diffTime = Math.abs(startDate - previousStart);
+        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        daysSincePrevious = diffDays;
+      }
+
+      return `
+        <div class="border-l-2 border-indigo-300 pl-3 py-2 flex justify-between items-start">
+          <div class="flex-1">
+            <div class="font-semibold text-gray-800">${event.summary || "Untitled Event"}</div>
+            <div class="text-sm text-gray-600">
+              ${formatDateTime(startDate)}
+              ${event.start.dateTime ? ` - ${endDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}` : ""}
+            </div>
+            ${event.location ? `<div class="text-xs text-gray-500 mt-1">📍 ${event.location}</div>` : ""}
+          </div>
+          ${
+            daysSincePrevious !== null
+              ? `<div class="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2 py-1 rounded ml-4 whitespace-nowrap">
+                  ${daysSincePrevious} ${daysSincePrevious === 1 ? "day" : "days"}
+                </div>`
+              : ""
+          }
+        </div>
+      `;
+    },
+  };
+
+  /**
    * Initialize the application when DOM is ready
    */
   async function init() {
@@ -320,97 +479,10 @@
     // Lambda@Edge handles the redirect back, so we just check and clean up
     await OAuthManager.handleOAuthCallback();
 
-    // Update status indicator
-    updateStatusIndicator();
-
-    // Add dynamic timestamp
-    addTimestamp();
-
-    // Add interactive features
-    addInteractiveFeatures();
-
     // Add locked content section
     addLockedContent();
 
     console.log("VJS Auth initialized successfully");
-  }
-
-  /**
-   * Update the status indicator to show script loaded
-   */
-  function updateStatusIndicator() {
-    const statusContainer = document.getElementById("status-container");
-    if (!statusContainer) return;
-
-    // Create new status item
-    const statusItem = document.createElement("li");
-    statusItem.className = "animate-fade-in";
-    statusItem.innerHTML = "✓ JavaScript loaded and executed";
-
-    statusContainer.appendChild(statusItem);
-  }
-
-  /**
-   * Add timestamp to show when script executed
-   */
-  function addTimestamp() {
-    const timestampContainer = document.getElementById("timestamp");
-    if (!timestampContainer) return;
-
-    const now = new Date();
-    const timeString = now.toLocaleTimeString();
-    const dateString = now.toLocaleDateString();
-
-    timestampContainer.innerHTML = `
-            <div class="text-sm text-gray-600 mt-4 p-3 bg-gray-50 rounded-lg">
-                <strong>Script executed:</strong> ${dateString} at ${timeString}
-            </div>
-        `;
-  }
-
-  /**
-   * Add interactive features to demonstrate dynamic capabilities
-   */
-  function addInteractiveFeatures() {
-    // Add click counter to demonstrate interactivity
-    const container = document.querySelector(".container");
-    if (!container) return;
-
-    let clickCount = 0;
-
-    const clickCounter = document.createElement("div");
-    clickCounter.id = "click-counter";
-    clickCounter.className = "mt-6 p-4 bg-indigo-50 rounded-lg border-l-4 border-indigo-500";
-    clickCounter.innerHTML = `
-            <h3 class="text-indigo-700 font-semibold mb-2">Interactive Demo</h3>
-            <p class="text-gray-700 mb-3">Click the button to test dynamic updates:</p>
-            <button
-                id="demo-button"
-                class="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200"
-            >
-                Click Me! (Count: <span id="click-count">0</span>)
-            </button>
-        `;
-
-    container.appendChild(clickCounter);
-
-    // Add click handler
-    const demoButton = document.getElementById("demo-button");
-    const clickCountSpan = document.getElementById("click-count");
-
-    if (demoButton && clickCountSpan) {
-      demoButton.addEventListener("click", function () {
-        clickCount++;
-        clickCountSpan.textContent = clickCount;
-        console.log(`Button clicked ${clickCount} time(s)`);
-
-        // Add visual feedback
-        this.classList.add("scale-95");
-        setTimeout(() => {
-          this.classList.remove("scale-95");
-        }, 100);
-      });
-    }
   }
 
   /**
@@ -442,14 +514,15 @@
                 <p class="text-gray-700 mb-4">
                     You are successfully authenticated with Google! Calendar features will be available here.
                 </p>
-                <div class="bg-white p-4 rounded-lg mb-4">
-                    <div class="flex items-center justify-center text-green-600 py-4">
-                        <svg class="w-12 h-12 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                <div id="calendar-data" class="bg-white p-4 rounded-lg mb-4">
+                    <div class="flex items-center justify-center text-blue-600 py-4">
+                        <svg class="animate-spin h-8 w-8 mr-3" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                         </svg>
                         <div>
-                            <p class="font-semibold text-lg">Authentication Successful</p>
-                            <p class="text-sm text-gray-600">Access token stored securely</p>
+                            <p class="font-semibold text-lg">Loading Calendar Data...</p>
+                            <p class="text-sm text-gray-600">Fetching your calendars and events</p>
                         </div>
                     </div>
                 </div>
@@ -479,6 +552,94 @@
           });
         }
       }, 100);
+
+      // Load calendar data
+      setTimeout(async () => {
+        const calendarDataDiv = document.getElementById("calendar-data");
+        if (!calendarDataDiv) return;
+
+        try {
+          console.log("Fetching calendars...");
+          const calendars = await CalendarManager.listCalendars();
+          console.log(`Found ${calendars.length} calendars`);
+
+          // Try to find SFLT calendar
+          const sfltCalendar = calendars.find((cal) => cal.summary === "SFLT");
+
+          let html = '<div class="space-y-4">';
+
+          // If SFLT calendar found, show events
+          if (sfltCalendar) {
+            console.log("SFLT calendar found, fetching events...");
+
+            const [allPastEvents, allUpcomingEvents] = await Promise.all([
+              CalendarManager.getRecentPastEvents(sfltCalendar.id, 20),
+              CalendarManager.getUpcomingEvents(sfltCalendar.id, 10),
+            ]);
+
+            // Filter events to only show those with title "B-SFLT-D1 💃"
+            const pastEvents = allPastEvents.filter((event) => event.summary === "B-SFLT-D1 💃").slice(0, 5);
+            const upcomingEvents = allUpcomingEvents.filter((event) => event.summary === "B-SFLT-D1 💃").slice(0, 3);
+
+            console.log(`Past events: ${pastEvents.length}, Upcoming events: ${upcomingEvents.length}`);
+
+            // Upcoming events
+            html += "<div>";
+            html += '<h4 class="font-semibold text-gray-800 mb-3">🔜 Upcoming Events</h4>';
+            if (upcomingEvents.length > 0) {
+              html += '<div class="space-y-2">';
+              upcomingEvents.forEach((event, index) => {
+                // For first upcoming event, use most recent past event as previous
+                // For subsequent events, use previous upcoming event
+                const previousEvent =
+                  index === 0 ? (pastEvents.length > 0 ? pastEvents[0] : null) : upcomingEvents[index - 1];
+                html += CalendarManager.formatEvent(event, previousEvent);
+              });
+              html += "</div>";
+            } else {
+              html += '<p class="text-sm text-gray-500 italic">No upcoming events</p>';
+            }
+            html += "</div>";
+
+            // Recent past events
+            html += '<div class="border-t pt-4 mt-4">';
+            html += '<h4 class="font-semibold text-gray-800 mb-3">📜 Recent Past Events</h4>';
+            if (pastEvents.length > 0) {
+              html += '<div class="space-y-2">';
+              pastEvents.forEach((event, index) => {
+                // For past events (most recent first), previous is the one after in array (earlier chronologically)
+                const previousEvent = index < pastEvents.length - 1 ? pastEvents[index + 1] : null;
+                html += CalendarManager.formatEvent(event, previousEvent);
+              });
+              html += "</div>";
+            } else {
+              html += '<p class="text-sm text-gray-500 italic">No recent past events</p>';
+            }
+            html += "</div>";
+          } else {
+            html += '<div class="text-center py-8">';
+            html +=
+              '<p class="text-gray-600">No "SFLT" calendar found. Please create an "SFLT" calendar to see events.</p>';
+            html += "</div>";
+          }
+
+          html += "</div>";
+          calendarDataDiv.innerHTML = html;
+        } catch (error) {
+          console.error("Failed to load calendar data:", error);
+          calendarDataDiv.innerHTML = `
+            <div class="flex items-center justify-center text-red-600 py-4">
+              <svg class="w-12 h-12 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+              </svg>
+              <div>
+                <p class="font-semibold text-lg">Failed to Load Calendar Data</p>
+                <p class="text-sm text-gray-600">${error.message}</p>
+              </div>
+            </div>
+          `;
+        }
+      }, 500);
     } else {
       // Unauthorized state - showing lock icon and sign-in button
       lockedContentDiv.innerHTML = `
