@@ -1,0 +1,15 @@
+{
+    "Project": {
+        "Name": "VjsAuth",
+        "Stage": "main",
+        "Account": "",
+        "Region": "us-east-1",
+        "Profile": "sflt"
+    },
+    "Stack": {
+        "Storage": {
+            "Name": "StorageStack",
+            "BucketName": "vjsauth"
+        }
+    }
+}
